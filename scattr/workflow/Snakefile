@@ -66,6 +66,9 @@ rule all:
         tck_files=inputs["T1w"].expand(
             rules.filtered_tck2connectome.output.sl_assignment
         ),
+        exemplar_files=inputs["T1w"].expand(
+            rules.connectome2tck_exemplars.output.exemplars_tck
+        ),
         dti_files=inputs["T1w"].expand(rules.dwi2tensor.output.dti),
         qc_files=rules.gather_qc.input,
     params:

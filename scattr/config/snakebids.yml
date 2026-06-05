@@ -232,6 +232,13 @@ parse_args:
       (default: 20,000,000 streamlines)"
     default: 20000000
 
+  --sl_count_local:
+    help: "(Mrtrix3) set the desired number of streamlines for the local
+      (convex-hull-seeded) tckgen run. Seeds are placed within the convex
+      hull interior to densely sample connections among the target ROIs.
+      (default: 5,000,000 streamlines)"
+    default: 5000000
+
   --radial_search:
     help: "(Mrtrix3) perform a radial search from each streamline endpoint to
       locate the nearest node. Argument is the maximum radius in mm; if no
@@ -259,6 +266,6 @@ freesurfer:
 
 # Containers
 singularity:
-  scattr: "docker://khanlab/scattr:v0.3.2"
+  scattr: "/nfs/khan/trainees/mkhaled5/scattr.sif"
 
 fs_license: /path/to/fs/license

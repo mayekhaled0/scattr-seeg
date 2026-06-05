@@ -169,37 +169,15 @@ rule filter_combine_tck:
         "tractography_update"
     container:
         config["singularity"]["scattr"]
-    shell:
-        """
-        mkdir -p {resources.tmp_dir}
-
-        parallel --jobs {threads} -k tckedit -exclude {{1}} \\
-        -tck_weights_in {{2}} -tck_weights_out {{3}} {{4}} \\
-        {{5}} ::: {input.filter_mask} :::+ {input.weights} :::+ \\
-        {params.filtered_weights} :::+ {input.tck} :::+ \\
-        {params.filtered_tck} || true
-
-        tckedit {params.filtered_tck_exists} \\
-        {resources.tmp_combined_tck} &> {log}
-
-        cat {params.filtered_weights_exists} >> \\
-        {resources.tmp_combined_weights}
-
-        rsync -v {resources.tmp_combined_tck} \\
-        {output.combined_tck} >> {log} 2>&1
-
-        rsync -v {resources.tmp_combined_weights} \\
-        {output.combined_weights} >> {log} 2>&1
-
-        rm {params.filtered_tck_exists} {params.filtered_weights_exists}
-        """
+    script:
+        "../../scripts/mrtpipelines/filter_combine_tck.py"
 
 
 rule filtered_tck2connectome:
     input:
         weights=rules.filter_combine_tck.output.combined_weights,
         tck=rules.filter_combine_tck.output.combined_tck,
-        subcortical_seg=rules.tckgen.input.subcortical_seg,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
     params:
         radius=config["radial_search"],
     output:
@@ -258,4 +236,66 @@ rule filtered_tck2connectome:
 
         rsync {resources.tmp_node_weights} \\
         {output.node_weights} >> {log} 2>&1
+        """
+
+
+rule connectome2tck_exemplars:
+    """
+    Extract one representative (exemplar) streamline per connection edge
+    from the filtered tractogram. The exemplar is the streamline closest
+    to the mean of all streamlines in that edge, making it ideal for
+    lightweight visualization of connectivity patterns.
+
+    Smith, R. E.; Tournier, J.-D.; Calamante, F. & Connelly, A.
+    The effects of SIFT on the reproducibility and biological accuracy
+    of the structural connectome. NeuroImage, 2015, 104, 253-265
+    """
+    input:
+        tck=rules.filter_combine_tck.output.combined_tck,
+        sl_assignment=rules.filtered_tck2connectome.output.sl_assignment,
+        num_labels=rules.get_num_nodes.output.num_labels,
+    output:
+        exemplars_tck=bids_tractography_out(
+            desc="filteredsubcorticalExemplars",
+            suffix="tractography.tck",
+        ),
+    threads: 8
+    resources:
+        tmp_dir=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            **wildcards,
+        ),
+        tmp_exemplars=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            desc="filteredsubcorticalExemplars",
+            suffix="tractography.tck",
+            **wildcards,
+        ),
+        mem_mb=32000,
+        time=60,
+    log:
+        bids_log(suffix="connectome2tckExemplars.log"),
+    group:
+        "tractography_update"
+    container:
+        config["singularity"]["scattr"]
+    shell:
+        """
+        mkdir -p {resources.tmp_dir}
+
+        num_labels=$(cat {input.num_labels})
+
+        connectome2tck -nthreads {threads} \
+        -nodes `seq -s, 1 $((num_labels))` \
+        -exclusive -files single \
+        -exemplars {resources.tmp_dir}/exemplar_coords.mif \
+        {input.tck} {input.sl_assignment} \
+        {resources.tmp_exemplars} &> {log}
+
+        rsync -v {resources.tmp_exemplars} \
+        {output.exemplars_tck} >> {log} 2>&1
         """

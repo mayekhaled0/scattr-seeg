@@ -1,5 +1,11 @@
-rule tckgen:
+rule tckgen_wholebrain:
     """
+    Whole-brain seeded tractography (no convex-hull exclusion).
+    Seeds are placed randomly across the brain mask and streamlines
+    must traverse the subcortical/contact segmentation (-include) to
+    be retained. The convex hull is NOT applied here so that long-range
+    connections passing through the ROIs are captured.
+
     Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic 
     streamlines tractography by 2nd order integration over fibre orientation 
     distributions. Proceedings of the International Society for Magnetic 
@@ -15,10 +21,132 @@ rule tckgen:
         sl=config["sl_count"],
     output:
         tck=bids_tractography_out(
-            desc="iFOD2",
+            desc="iFOD2wholebrain",
             suffix="tractography.tck",
         ),
     threads: 32
+    resources:
+        tmp_dir=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            **wildcards,
+        ),
+        tmp_tck=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            desc="iFOD2wholebrain",
+            suffix="tractography.tck",
+            **wildcards,
+        ),
+        mem_mb=128000,
+        time=60 * 24,
+    log:
+        bids_log(suffix="tckgen_wholebrain.log"),
+    container:
+        config["singularity"]["scattr"]
+    shell:
+        """
+        mkdir -p {resources.tmp_dir}
+
+        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
+            -select {params.sl} \\
+            -mask {input.mask} \\
+            -seed_image {input.mask} {input.fod} {resources.tmp_tck} &> {log}
+
+        rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
+        """
+
+
+rule tckgen_local:
+    """
+    Local tractography seeded within the convex hull interior.
+    The convex hull image stores 0=inside and 1=outside, so it is
+    inverted with mrcalc to produce a mask where 1=interior.
+    Streamlines are seeded and confined within this interior mask,
+    densely sampling connections among the target ROIs.
+
+    Tournier, J.-D.; Calamante, F. & Connelly, A. Improved probabilistic 
+    streamlines tractography by 2nd order integration over fibre orientation 
+    distributions. Proceedings of the International Society for Magnetic 
+    Resonance in Medicine, 2010, 1670
+    """
+    input:
+        fod=rules.mtnormalise.output.wm_fod,
+        mask=rules.nii2mif.output.mask,
+        convex_hull=rules.create_convex_hull.output.convex_hull,
+        subcortical_seg=rules.get_num_nodes.input.seg,
+    params:
+        step=config["step"],
+        sl=config["sl_count_local"],
+    output:
+        tck=bids_tractography_out(
+            desc="iFOD2local",
+            suffix="tractography.tck",
+        ),
+    threads: 16
+    resources:
+        tmp_dir=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            **wildcards,
+        ),
+        tmp_tck=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            desc="iFOD2local",
+            suffix="tractography.tck",
+            **wildcards,
+        ),
+        interior_mask=lambda wildcards: bids_tractography_out(
+            root=os.environ.get("SLURM_TMPDIR")
+            if config.get("slurm_tmpdir")
+            else "/tmp",
+            desc="convexHullInterior",
+            suffix="mask.mif",
+            **wildcards,
+        ),
+        mem_mb=64000,
+        time=60 * 12,
+    log:
+        bids_log(suffix="tckgen_local.log"),
+    container:
+        config["singularity"]["scattr"]
+    shell:
+        """
+        mkdir -p {resources.tmp_dir}
+
+        # Invert hull: 0=inside->1, 1=outside->0, so interior becomes valid
+        mrcalc {input.convex_hull} 1 -sub {resources.interior_mask} &> {log}
+
+        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
+            -select {params.sl} \\
+            -include {input.subcortical_seg} \\
+            -mask {resources.interior_mask} \\
+            -seed_image {resources.interior_mask} \\
+            {input.fod} {resources.tmp_tck} >> {log} 2>&1
+
+        rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
+        """
+
+
+rule tckedit_combine:
+    """
+    Concatenate whole-brain and local tractograms into a single .tck file
+    for downstream SIFT2 weighting and connectome construction.
+    """
+    input:
+        tck_wholebrain=rules.tckgen_wholebrain.output.tck,
+        tck_local=rules.tckgen_local.output.tck,
+    output:
+        tck=bids_tractography_out(
+            desc="iFOD2",
+            suffix="tractography.tck",
+        ),
+    threads: 4
     resources:
         tmp_dir=lambda wildcards: bids_tractography_out(
             root=os.environ.get("SLURM_TMPDIR")
@@ -34,20 +162,18 @@ rule tckgen:
             suffix="tractography.tck",
             **wildcards,
         ),
-        mem_mb=128000,
-        time=60 * 24,
+        mem_mb=32000,
+        time=60 * 2,
     log:
-        bids_log(suffix="tckgen.log"),
+        bids_log(suffix="tckedit_combine.log"),
     container:
         config["singularity"]["scattr"]
     shell:
         """
-        mkdir -p {resources.tmp_dir} 
+        mkdir -p {resources.tmp_dir}
 
-        tckgen -nthreads {threads} -algorithm iFOD2 -step {params.step} \\
-            -select {params.sl} -exclude {input.convex_hull} \\
-            -include {input.subcortical_seg} -mask {input.mask} \\
-            -seed_image {input.mask} {input.fod} {resources.tmp_tck} &> {log} 
+        tckedit {input.tck_wholebrain} {input.tck_local} \\
+            {resources.tmp_tck} &> {log}
 
         rsync -v {resources.tmp_tck} {output.tck} >> {log} 2>&1
         """
@@ -60,7 +186,7 @@ rule tcksift2:
     connectome. NeuroImage, 2015, 104, 253-265
     """
     input:
-        tck=rules.tckgen.output.tck,
+        tck=rules.tckedit_combine.output.tck,
         fod=rules.mtnormalise.output.wm_fod,
     output:
         weights=bids_tractography_out(
@@ -85,7 +211,7 @@ rule tcksift2:
 
 checkpoint create_roi_mask:
     input:
-        subcortical_seg=rules.tckgen.input.subcortical_seg,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
         num_labels=rules.get_num_nodes.output.num_labels,
     params:
         base_dir=mrtrix_dir,
@@ -144,7 +270,7 @@ checkpoint create_exclude_mask:
     input:
         unpack(aggregate_rois),
         rules.create_roi_mask.output.out_dir,
-        subcortical_seg=rules.tckgen.input.subcortical_seg,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
         num_labels=rules.get_num_nodes.output.num_labels,
     params:
         base_dir=mrtrix_dir,
@@ -179,8 +305,8 @@ rule tck2connectome:
     """
     input:
         weights=rules.tcksift2.output.weights,
-        tck=rules.tckgen.output.tck,
-        subcortical_seg=rules.tckgen.input.subcortical_seg,
+        tck=rules.tckedit_combine.output.tck,
+        subcortical_seg=rules.tckgen_wholebrain.input.subcortical_seg,
     params:
         radius=config["radial_search"],
     output:
@@ -246,7 +372,7 @@ checkpoint connectome2tck:
     input:
         node_weights=rules.tcksift2.output.weights,
         sl_assignment=rules.tck2connectome.output.sl_assignment,
-        tck=rules.tckgen.output.tck,
+        tck=rules.tckedit_combine.output.tck,
         num_labels=rules.get_num_nodes.output.num_labels,
     output:
         output_dir=directory(
